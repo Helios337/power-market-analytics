@@ -1,0 +1,88 @@
+name: Energy Warehouse CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: energy
+          POSTGRES_PASSWORD: energy
+          POSTGRES_DB: energywarehouse
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U energy -d energywarehouse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..30}; do
+            if pg_isready -h localhost -p 5432 -U energy; then
+              echo "PostgreSQL is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL did not become ready"
+          exit 1
+
+      - name: Apply schema
+        env:
+          PGPASSWORD: energy
+        run: psql -h localhost -U energy -d energywarehouse -f src/schema.sql
+
+      - name: Run ETL
+        env:
+          POSTGRES_USER: energy
+          POSTGRES_PASSWORD: energy
+          POSTGRES_DB: energywarehouse
+          DB_HOST: localhost
+          DB_PORT: "5432"
+        run: python src/etl.py
+
+      - name: Run analytical queries
+        env:
+          POSTGRES_USER: energy
+          POSTGRES_PASSWORD: energy
+          POSTGRES_DB: energywarehouse
+          PGPASSWORD: energy
+          PSQL_CMD: "psql -h localhost -U energy -d energywarehouse -f /dev/stdin"
+        run: bash queries/run_all.sh
+
+      - name: Run CI assertions
+        env:
+          POSTGRES_USER: energy
+          POSTGRES_PASSWORD: energy
+          POSTGRES_DB: energywarehouse
+          DB_HOST: localhost
+          DB_PORT: "5432"
+        run: python tests/test_assertions.py

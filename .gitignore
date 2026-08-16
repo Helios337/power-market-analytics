@@ -1,0 +1,16 @@
+# Environment and virtualenv
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Generated outputs
+output/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
