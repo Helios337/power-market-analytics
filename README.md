@@ -345,7 +345,7 @@ GitHub Actions runs on every push:
 2. Applies `src/schema.sql`.
 3. Runs `src/etl.py`.
 4. Executes all five queries via `queries/run_all.sh`.
-5. Runs `tests/test_assertions.py` to verify counts, constraints, and idempotency.
+5. Runs `tests/test_assertions.py` to verify counts, constraints, idempotency, and the ETL's pure transforms (shares, calendar, cleaning, EIA overlay).
 
 ## License
 

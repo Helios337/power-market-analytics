@@ -173,6 +173,40 @@ def _upsert_dim_time(engine: Engine, dim_time: pd.DataFrame) -> None:
         conn.execute(text(sql))
 
 
+def _upsert_dimensions(engine: Engine, df: pd.DataFrame) -> None:
+    """
+    Upsert any regions/fuels present in the source data but not yet seeded.
+
+    The canonical region/fuel metadata lives in src/schema.sql; this step only
+    backfills rows for codes that appear in the data (e.g. from live EIA
+    overlays) so facts never get silently dropped by the joins below.
+    Existing seeded rows are left untouched (ON CONFLICT DO NOTHING).
+    """
+    logger.info("Upserting dim_region / dim_fuel from source data")
+    regions = df[["region_code"]].drop_duplicates()
+    regions.to_sql("_staging_regions", engine, if_exists="replace", index=False)
+    region_sql = """
+        INSERT INTO dim_region (region_code, region_name, country, timezone)
+        SELECT region_code, region_code, 'USA', 'UTC'
+        FROM _staging_regions
+        ON CONFLICT (region_code) DO NOTHING;
+        DROP TABLE _staging_regions;
+    """
+
+    fuels = df[["fuel_type"]].drop_duplicates()
+    fuels.to_sql("_staging_fuels", engine, if_exists="replace", index=False)
+    fuel_sql = """
+        INSERT INTO dim_fuel (fuel_type, is_renewable, category)
+        SELECT fuel_type, FALSE, 'other'
+        FROM _staging_fuels
+        ON CONFLICT (fuel_type) DO NOTHING;
+        DROP TABLE _staging_fuels;
+    """
+    with engine.begin() as conn:
+        conn.execute(text(region_sql))
+        conn.execute(text(fuel_sql))
+
+
 def _upsert_fact_energy_demand(engine: Engine, df: pd.DataFrame) -> int:
     """Upsert hourly demand/price facts."""
     logger.info("Upserting fact_energy_demand")
@@ -250,7 +284,13 @@ def run_sanity_checks(engine: Engine) -> dict[str, Any]:
         "dim_fuel": "SELECT COUNT(*) FROM dim_fuel",
         "fact_energy_demand": "SELECT COUNT(*) FROM fact_energy_demand",
         "fact_generation_mix": "SELECT COUNT(*) FROM fact_generation_mix",
-        "date_range": "SELECT MIN(ts), MAX(ts) FROM dim_time",
+        "date_range": """
+            SELECT TO_CHAR(MIN(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI')
+                    || ' UTC to ' ||
+                   TO_CHAR(MAX(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI')
+                    || ' UTC'
+            FROM dim_time
+        """,
         "share_sum_violations": """
             SELECT COUNT(*) FROM (
                 SELECT time_id, region_id, SUM(share_percent) AS total
@@ -290,6 +330,7 @@ def main() -> None:
     dim_time = build_dim_time(cleaned)
 
     _upsert_dim_time(engine, dim_time)
+    _upsert_dimensions(engine, cleaned)
     _upsert_fact_energy_demand(engine, cleaned)
     _upsert_fact_generation_mix(engine, cleaned)
 

@@ -28,9 +28,11 @@ CREATE TABLE dim_time (
     weekday     VARCHAR(10) NOT NULL,
     is_weekend  BOOLEAN NOT NULL,
     CONSTRAINT chk_dim_time_month_day CHECK (
-        (month IN (1,3,5,7,8,10,12) AND day <= 31) OR
-        (month IN (4,6,9,11) AND day <= 30) OR
-        (month = 2)
+        day >= 1 AND (
+            (month IN (1,3,5,7,8,10,12) AND day <= 31) OR
+            (month IN (4,6,9,11) AND day <= 30) OR
+            (month = 2 AND day <= 29)
+        )
     )
 );
 
