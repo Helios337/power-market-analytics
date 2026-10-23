@@ -11,6 +11,10 @@ DB_PORT ?= 5432
 .PHONY: up down wait-db schema seed verify clean notebook
 
 up:
+	@if [ ! -f .env ] && [ -f .env.example ]; then \
+		echo "Creating .env from .env.example"; \
+		cp .env.example .env; \
+	fi
 	docker compose up -d
 
 down:
