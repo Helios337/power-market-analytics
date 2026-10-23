@@ -40,9 +40,10 @@ This guarantees the pipeline runs in CI and on any machine without registration.
 | ts        UQ   |         | region_code UQ |         | fuel_type  UQ  |
 | date           |         | region_name    |         | is_renewable   |
 | hour           |         | country        |         | category       |
-| month          |         | timezone       |         +----------------+
-| quarter        |         | eia_ba_code    |
-| year           |         +----------------+
+| day            |         | timezone       |         +----------------+
+| month          |         | eia_ba_code    |
+| quarter        |         +----------------+
+| year           |
 | weekday        |
 | is_weekend     |
 +--------+-------+
@@ -76,10 +77,12 @@ Grain:
 ## Project Structure
 
 ```text
-energy_warehouse/
+power-market-analytics/
 ├── docker-compose.yml          # postgres:16 service
 ├── Makefile                    # up, down, seed, verify, clean
-├── requirements.txt
+├── pyproject.toml              # ruff, mypy, pytest configuration
+├── requirements.txt            # pinned runtime dependencies
+├── requirements-dev.txt        # pinned dev dependencies (pytest, ruff, mypy)
 ├── .env.example                # copy to .env and fill EIA_API_KEY optionally
 ├── src/
 │   ├── schema.sql              # full DDL
@@ -144,6 +147,11 @@ energy_warehouse/
 
 The ETL uses natural-key `UNIQUE` constraints and `INSERT ... ON CONFLICT DO UPDATE`.
 Re-running `make seed` does not create duplicates.
+
+Note: `make seed` re-applies `src/schema.sql`, which drops and recreates the
+tables, so the unchanged counts after a re-seed are expected. The meaningful
+proof is at the ETL level: `test_etl_idempotent` runs `src/etl.py` a second
+time against the same schema and asserts that every row count is unchanged.
 
 Real output after two consecutive runs:
 
@@ -235,19 +243,39 @@ WHERE rnk <= 3;
 See `queries/q04_fuel_mix_pivot.sql`:
 
 ```sql
+WITH regional_quarterly_generation AS (
+    SELECT
+        dr.region_code,
+        dt.year,
+        dt.quarter,
+        df.fuel_type,
+        fgm.generation_mwh
+    FROM fact_generation_mix fgm
+    JOIN dim_time dt ON dt.time_id = fgm.time_id
+    JOIN dim_region dr ON dr.region_id = fgm.region_id
+    JOIN dim_fuel df ON df.fuel_id = fgm.fuel_id
+)
 SELECT
-    dr.region_code,
-    dt.year,
-    dt.quarter,
-    100.0 * SUM(fgm.generation_mwh) FILTER (WHERE df.fuel_type = 'Coal')
-        / NULLIF(SUM(fgm.generation_mwh), 0) AS coal_pct,
-    100.0 * SUM(fgm.generation_mwh) FILTER (WHERE df.fuel_type = 'Natural Gas')
-        / NULLIF(SUM(fgm.generation_mwh), 0) AS natural_gas_pct
-FROM fact_generation_mix fgm
-JOIN dim_time dt ON dt.time_id = fgm.time_id
-JOIN dim_region dr ON dr.region_id = fgm.region_id
-JOIN dim_fuel df ON df.fuel_id = fgm.fuel_id
-GROUP BY dr.region_code, dt.year, dt.quarter;
+    region_code,
+    year,
+    quarter,
+    ROUND(SUM(generation_mwh)::numeric, 2) AS total_generation_mwh,
+    ROUND(100.0 * SUM(generation_mwh) FILTER (WHERE fuel_type = 'Coal')
+        / NULLIF(SUM(generation_mwh), 0), 2) AS coal_pct,
+    ROUND(100.0 * SUM(generation_mwh) FILTER (WHERE fuel_type = 'Natural Gas')
+        / NULLIF(SUM(generation_mwh), 0), 2) AS natural_gas_pct,
+    ROUND(100.0 * SUM(generation_mwh) FILTER (WHERE fuel_type = 'Nuclear')
+        / NULLIF(SUM(generation_mwh), 0), 2) AS nuclear_pct,
+    ROUND(100.0 * SUM(generation_mwh) FILTER (WHERE fuel_type = 'Hydro')
+        / NULLIF(SUM(generation_mwh), 0), 2) AS hydro_pct,
+    ROUND(100.0 * SUM(generation_mwh) FILTER (WHERE fuel_type = 'Wind')
+        / NULLIF(SUM(generation_mwh), 0), 2) AS wind_pct,
+    ROUND(100.0 * SUM(generation_mwh) FILTER (WHERE fuel_type = 'Solar')
+        / NULLIF(SUM(generation_mwh), 0), 2) AS solar_pct,
+    ROUND(100.0 * SUM(generation_mwh) FILTER (WHERE fuel_type = 'Other')
+        / NULLIF(SUM(generation_mwh), 0), 2) AS other_pct
+FROM regional_quarterly_generation
+GROUP BY region_code, year, quarter;
 ```
 
 ### 5. 24-hour moving average of demand
@@ -342,10 +370,13 @@ Captured from a clean `make clean && make up && make seed && make verify` run.
 
 GitHub Actions runs on every push:
 1. Spins up a PostgreSQL 16 service container.
-2. Applies `src/schema.sql`.
-3. Runs `src/etl.py`.
-4. Executes all five queries via `queries/run_all.sh`.
-5. Runs `tests/test_assertions.py` to verify counts, constraints, idempotency, and the ETL's pure transforms (shares, calendar, cleaning, EIA overlay).
+2. Lints with Ruff and type-checks `src/` with mypy.
+3. Applies `src/schema.sql`.
+4. Runs `src/etl.py`.
+5. Executes all five queries via `queries/run_all.sh`.
+6. Runs the test suite with `pytest tests/ -v` to verify counts, constraints,
+   idempotency, and the ETL's pure transforms (shares, calendar, cleaning,
+   EIA overlay).
 
 ## License
 

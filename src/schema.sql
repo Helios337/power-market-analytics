@@ -31,7 +31,10 @@ CREATE TABLE dim_time (
         day >= 1 AND (
             (month IN (1,3,5,7,8,10,12) AND day <= 31) OR
             (month IN (4,6,9,11) AND day <= 30) OR
-            (month = 2 AND day <= 29)
+            (month = 2 AND day <= 28) OR
+            (month = 2 AND day = 29
+                AND (MOD(year, 4) = 0
+                     AND (MOD(year, 100) <> 0 OR MOD(year, 400) = 0)))
         )
     )
 );
