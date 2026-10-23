@@ -177,12 +177,13 @@ SELECT
     SUM(fed.demand_mw) OVER (
         PARTITION BY fed.region_id
         ORDER BY dt.ts
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     ) AS cumulative_demand_mw
 FROM fact_energy_demand fed
 JOIN dim_time dt ON dt.time_id = fed.time_id
 JOIN dim_region dr ON dr.region_id = fed.region_id
-ORDER BY dr.region_code, dt.ts;
-```
+ORDER BY dr.region_code, dt.ts
+LIMIT 20;```
 
 ### 2. Hour-over-hour price percentage change
 
@@ -195,7 +196,8 @@ WITH price_lag AS (
         dt.ts,
         fed.price_musd_mwh,
         LAG(fed.price_musd_mwh) OVER (
-            PARTITION BY fed.region_id ORDER BY dt.ts
+            PARTITION BY fed.region_id
+            ORDER BY dt.ts
         ) AS prev_price_musd_mwh
     FROM fact_energy_demand fed
     JOIN dim_time dt ON dt.time_id = fed.time_id
@@ -204,12 +206,15 @@ WITH price_lag AS (
 SELECT
     region_code,
     ts,
-    price_musd_mwh,
-    COALESCE(prev_price_musd_mwh, price_musd_mwh) AS prev_price_musd_mwh,
-    100.0 * (price_musd_mwh - COALESCE(prev_price_musd_mwh, price_musd_mwh))
-        / NULLIF(COALESCE(prev_price_musd_mwh, price_musd_mwh), 0) AS price_pct_change
-FROM price_lag;
-```
+    ROUND(price_musd_mwh::numeric, 2) AS price_musd_mwh,
+    ROUND(COALESCE(prev_price_musd_mwh, price_musd_mwh)::numeric, 2) AS prev_price_musd_mwh,
+    ROUND(
+        100.0 * (price_musd_mwh - COALESCE(prev_price_musd_mwh, price_musd_mwh))
+        / NULLIF(COALESCE(prev_price_musd_mwh, price_musd_mwh), 0)
+    , 2) AS price_pct_change
+FROM price_lag
+ORDER BY region_code, ts
+LIMIT 20;```
 
 ### 3. Top-3 regions by average peak-hour demand per quarter
 
@@ -217,26 +222,44 @@ See `queries/q03_top_regions.sql`:
 
 ```sql
 WITH peak_hour_demand AS (
-    SELECT dr.region_code, dt.year, dt.quarter, fed.demand_mw
+    SELECT
+        dr.region_id,
+        dr.region_code,
+        dt.year,
+        dt.quarter,
+        fed.demand_mw
     FROM fact_energy_demand fed
     JOIN dim_time dt ON dt.time_id = fed.time_id
     JOIN dim_region dr ON dr.region_id = fed.region_id
     WHERE dt.hour BETWEEN 17 AND 21
 ),
 avg_peak AS (
-    SELECT region_code, year, quarter, AVG(demand_mw) AS avg_peak_demand_mw
+    SELECT
+        region_code,
+        year,
+        quarter,
+        ROUND(AVG(demand_mw)::numeric, 2) AS avg_peak_demand_mw
     FROM peak_hour_demand
     GROUP BY region_code, year, quarter
 ),
 ranked AS (
-    SELECT *,
-        RANK() OVER (PARTITION BY year, quarter ORDER BY avg_peak_demand_mw DESC) AS rnk
+    SELECT
+        *,
+        RANK() OVER (
+            PARTITION BY year, quarter
+            ORDER BY avg_peak_demand_mw DESC
+        ) AS rnk
     FROM avg_peak
 )
-SELECT year, quarter, region_code, avg_peak_demand_mw, rnk
+SELECT
+    year,
+    quarter,
+    region_code,
+    avg_peak_demand_mw,
+    rnk
 FROM ranked
-WHERE rnk <= 3;
-```
+WHERE rnk <= 3
+ORDER BY year, quarter, rnk;```
 
 ### 4. Fuel mix pivot by region and quarter
 
@@ -276,27 +299,36 @@ SELECT
         / NULLIF(SUM(generation_mwh), 0), 2) AS other_pct
 FROM regional_quarterly_generation
 GROUP BY region_code, year, quarter
-ORDER BY region_code, year, quarter;
-```
+ORDER BY region_code, year, quarter;```
 
 ### 5. 24-hour moving average of demand
 
 See `queries/q05_moving_average.sql`:
 
 ```sql
+WITH ma AS (
+    SELECT
+        dr.region_code,
+        dt.ts,
+        fed.demand_mw,
+        AVG(fed.demand_mw) OVER (
+            PARTITION BY fed.region_id
+            ORDER BY dt.ts
+            ROWS BETWEEN 23 PRECEDING AND CURRENT ROW
+        ) AS demand_ma_24h
+    FROM fact_energy_demand fed
+    JOIN dim_time dt ON dt.time_id = fed.time_id
+    JOIN dim_region dr ON dr.region_id = fed.region_id
+)
 SELECT
-    dr.region_code,
-    dt.ts,
-    fed.demand_mw,
-    AVG(fed.demand_mw) OVER (
-        PARTITION BY fed.region_id
-        ORDER BY dt.ts
-        ROWS BETWEEN 23 PRECEDING AND CURRENT ROW
-    ) AS demand_ma_24h
-FROM fact_energy_demand fed
-JOIN dim_time dt ON dt.time_id = fed.time_id
-JOIN dim_region dr ON dr.region_id = fed.region_id;
-```
+    region_code,
+    ts,
+    ROUND(demand_mw::numeric, 2) AS demand_mw,
+    ROUND(demand_ma_24h::numeric, 2) AS demand_ma_24h
+FROM ma
+WHERE ts >= (SELECT MIN(ts) FROM dim_time) + INTERVAL '23 hours'
+ORDER BY region_code, ts
+LIMIT 20;```
 
 ## Key Finding
 
@@ -310,7 +342,7 @@ This quantifies the scarcity premium during high-demand evening hours in Texas a
 
 Captured from a clean `make clean && make up && make seed && make verify` run.
 
-### Q1 - Running total of hourly demand (first 20 rows)
+### Q1 - Running total of hourly demand (excerpt)
 
 ```text
  region_code |           ts           | demand_mw | cumulative_demand_mw
@@ -323,7 +355,7 @@ Captured from a clean `make clean && make up && make seed && make verify` run.
  CISO        | 2024-01-01 05:00:00+00 |  28120.61 |            185189.38
 ```
 
-### Q2 - Hour-over-hour price percentage change (first 10 rows)
+### Q2 - Hour-over-hour price percentage change (excerpt)
 
 ```text
  region_code |           ts           | price_musd_mwh | prev_price_musd_mwh | price_pct_change
@@ -355,7 +387,7 @@ Captured from a clean `make clean && make up && make seed && make verify` run.
  PJM         | 2024 |       1 |         243965661.58 |    18.02 |           39.84 |       20.57 |      3.91 |    12.06 |      1.50 |      4.09
 ```
 
-### Q5 - 24-hour moving average of demand (first 10 rows)
+### Q5 - 24-hour moving average of demand (excerpt)
 
 ```text
  region_code |           ts           | demand_mw | demand_ma_24h
