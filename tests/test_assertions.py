@@ -1,8 +1,10 @@
 """
 CI-style assertions for the warehouse.
 
-Run after `make seed` to verify row counts, constraints, query outputs,
-and ETL idempotency.
+Run with pytest after `make seed`:
+    pytest tests/ -v
+
+Verifies row counts, constraints, query outputs, and ETL idempotency.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from sqlalchemy import text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -175,6 +178,10 @@ def test_overlay_eia_applies_live_data() -> None:
     print("PASS: live overlay replaces matching keys and preserves the rest")
 
 
+@pytest.mark.skipif(
+    os.getenv("EIA_API_KEY") is not None,
+    reason="exact counts are sample-specific; a live EIA overlay changes them",
+)
 def test_counts() -> None:
     """Assert exact expected row counts for each table."""
     for table, expected in EXPECTED.items():
@@ -199,12 +206,10 @@ def test_share_constraint() -> None:
     assert violations == 0, f"Found {violations} region-hours with share sums outside 99.5-100.5"
     print(f"PASS: share_percent sums OK ({violations} violations)")
 
-
 def test_query_outputs_exist() -> None:
     """All query output files must be non-empty."""
     output_dir = Path(__file__).resolve().parents[1] / "output"
     for i in range(1, 6):
-        path = output_dir / f"q{i:02d}_*.txt"
         files = list(output_dir.glob(f"q{i:02d}_*.txt"))
         assert files, f"Missing output file for query {i}"
         for f in files:
@@ -227,38 +232,3 @@ def test_etl_idempotent() -> None:
     after = {t: _count(t) for t in EXPECTED}
     assert before == after, f"ETL is not idempotent: before={before}, after={after}"
     print("PASS: ETL is idempotent")
-
-
-def main() -> int:
-    tests = [
-        # pure unit checks first (no database required)
-        test_recompute_shares_sum_to_100,
-        test_build_dim_time_contiguous_hourly,
-        test_clean_and_validate_enforces_bounds,
-        test_overlay_eia_falls_back_without_key,
-        test_overlay_eia_applies_live_data,
-        # integration checks against the live warehouse
-        test_counts,
-        test_share_constraint,
-        test_query_outputs_exist,
-        test_etl_idempotent,
-    ]
-    failed = 0
-    for test in tests:
-        try:
-            test()
-        except AssertionError as exc:
-            print(f"FAIL: {test.__name__}: {exc}")
-            failed += 1
-        except Exception as exc:
-            print(f"ERROR: {test.__name__}: {exc}")
-            failed += 1
-    if failed:
-        print(f"\n{failed} test(s) failed")
-        return 1
-    print("\nAll assertions passed")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
