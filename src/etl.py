@@ -146,7 +146,7 @@ def build_dim_time(df: pd.DataFrame) -> pd.DataFrame:
     dim["quarter"] = dim["ts"].dt.quarter.astype(np.int16)
     dim["year"] = dim["ts"].dt.year.astype(np.int16)
     dim["weekday"] = dim["ts"].dt.day_name()
-    dim["is_weekend"] = dim["ts"].dt.weekday >= 5
+    dim["is_weekend"] = dim["ts"].dt.day_of_week >= 5
     return dim
 
 
