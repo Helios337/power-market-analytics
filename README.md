@@ -275,7 +275,8 @@ SELECT
     ROUND(100.0 * SUM(generation_mwh) FILTER (WHERE fuel_type = 'Other')
         / NULLIF(SUM(generation_mwh), 0), 2) AS other_pct
 FROM regional_quarterly_generation
-GROUP BY region_code, year, quarter;
+GROUP BY region_code, year, quarter
+ORDER BY region_code, year, quarter;
 ```
 
 ### 5. 24-hour moving average of demand
