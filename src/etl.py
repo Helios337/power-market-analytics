@@ -33,6 +33,39 @@ SAMPLE_PATH = PROJECT_ROOT / "data" / "sample_energy.csv"
 DEMAND_QUANTILE_UPPER = 0.995
 PRICE_QUANTILE_UPPER = 0.999
 
+# Metadata for common EIA balancing authority codes. Used when the ETL
+# backfills dim_region rows for codes that appear in live EIA data but
+# are not seeded in schema.sql. Unknown codes fall back to (code, 'UTC').
+BA_METADATA: dict[str, tuple[str, str]] = {
+    "ERCO": ("Electric Reliability Council of Texas", "America/Chicago"),
+    "PJM": ("PJM Interconnection", "America/New_York"),
+    "CISO": ("California Independent System Operator", "America/Los_Angeles"),
+    "MISO": ("Midcontinent Independent System Operator", "America/Chicago"),
+    "NYIS": ("New York Independent System Operator", "America/New_York"),
+    "ISNE": ("ISO New England", "America/New_York"),
+    "SWPP": ("Southwest Power Pool", "America/Chicago"),
+    "PSEI": ("Puget Sound Energy", "America/Los_Angeles"),
+    "BANC": ("Balancing Authority of Northern California", "America/Los_Angeles"),
+    "AZPS": ("Arizona Public Service", "America/Phoenix"),
+    "DUK": ("Duke Energy", "America/New_York"),
+    "FPC": ("Florida Power & Light", "America/New_York"),
+    "FMPP": ("Florida Municipal Power Pool", "America/New_York"),
+    "LDWP": ("Los Angeles Department of Water and Power", "America/Los_Angeles"),
+    "SEDC": ("Southern California Edison", "America/Los_Angeles"),
+    "PSNC": ("Public Service Company of North Carolina", "America/New_York"),
+    "TAL": ("Talen Energy", "America/New_York"),
+    "TVA": ("Tennessee Valley Authority", "America/New_York"),
+    "WALC": ("Western Area Power Administration", "America/Denver"),
+    "AEC": ("Alberta Electric System Operator", "America/Edmonton"),
+    "IESO": ("Ontario Independent Electricity System Operator", "America/Toronto"),
+    "NBSO": ("New Brunswick System Operator", "America/Halifax"),
+}
+
+
+def _region_metadata(region_code: str) -> tuple[str, str]:
+    """Return (region_name, timezone) for a balancing authority code."""
+    return BA_METADATA.get(region_code, (region_code, "UTC"))
+
 
 def load_sample_csv(path: Path = SAMPLE_PATH) -> pd.DataFrame:
     """Read the deterministic sample CSV."""
@@ -166,11 +199,14 @@ def _upsert_dim_time(engine: Engine, dim_time: pd.DataFrame) -> None:
             quarter = EXCLUDED.quarter,
             year = EXCLUDED.year,
             weekday = EXCLUDED.weekday,
-            is_weekend = EXCLUDED.is_weekend;
-        DROP TABLE _staging_dim_time;
+            is_weekend = EXCLUDED.is_weekend
     """
-    with engine.begin() as conn:
-        conn.execute(text(sql))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS _staging_dim_time"))
 
 
 def _upsert_dimensions(engine: Engine, df: pd.DataFrame) -> None:
@@ -180,17 +216,29 @@ def _upsert_dimensions(engine: Engine, df: pd.DataFrame) -> None:
     The canonical region/fuel metadata lives in src/schema.sql; this step only
     backfills rows for codes that appear in the data (e.g. from live EIA
     overlays) so facts never get silently dropped by the joins below.
+    Region names and timezones come from BA_METADATA when known, with
+    safe defaults (code, 'UTC') otherwise.
     Existing seeded rows are left untouched (ON CONFLICT DO NOTHING).
     """
     logger.info("Upserting dim_region / dim_fuel from source data")
-    regions = df[["region_code"]].drop_duplicates()
+    regions = (
+        df[["region_code"]]
+        .drop_duplicates()
+        .assign(
+            region_name=lambda d: d["region_code"].map(
+                lambda code: _region_metadata(code)[0]
+            ),
+            timezone=lambda d: d["region_code"].map(
+                lambda code: _region_metadata(code)[1]
+            ),
+        )
+    )
     regions.to_sql("_staging_regions", engine, if_exists="replace", index=False)
     region_sql = """
         INSERT INTO dim_region (region_code, region_name, country, timezone)
-        SELECT region_code, region_code, 'USA', 'UTC'
+        SELECT region_code, region_name, 'USA', timezone
         FROM _staging_regions
-        ON CONFLICT (region_code) DO NOTHING;
-        DROP TABLE _staging_regions;
+        ON CONFLICT (region_code) DO NOTHING
     """
 
     fuels = df[["fuel_type"]].drop_duplicates()
@@ -199,12 +247,16 @@ def _upsert_dimensions(engine: Engine, df: pd.DataFrame) -> None:
         INSERT INTO dim_fuel (fuel_type, is_renewable, category)
         SELECT fuel_type, FALSE, 'other'
         FROM _staging_fuels
-        ON CONFLICT (fuel_type) DO NOTHING;
-        DROP TABLE _staging_fuels;
+        ON CONFLICT (fuel_type) DO NOTHING
     """
-    with engine.begin() as conn:
-        conn.execute(text(region_sql))
-        conn.execute(text(fuel_sql))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(region_sql))
+            conn.execute(text(fuel_sql))
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS _staging_regions"))
+            conn.execute(text("DROP TABLE IF EXISTS _staging_fuels"))
 
 
 def _upsert_fact_energy_demand(engine: Engine, df: pd.DataFrame) -> int:
@@ -227,14 +279,16 @@ def _upsert_fact_energy_demand(engine: Engine, df: pd.DataFrame) -> int:
             demand_mw = EXCLUDED.demand_mw,
             price_musd_mwh = EXCLUDED.price_musd_mwh
     """
-    with engine.begin() as conn:
-        conn.execute(text(insert_sql))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(insert_sql))
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS _staging_demand"))
 
     with engine.connect() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM fact_energy_demand")).scalar_one()
 
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE _staging_demand"))
     return int(count)
 
 
@@ -264,14 +318,16 @@ def _upsert_fact_generation_mix(engine: Engine, df: pd.DataFrame) -> int:
             generation_mwh = EXCLUDED.generation_mwh,
             share_percent = EXCLUDED.share_percent
     """
-    with engine.begin() as conn:
-        conn.execute(text(insert_sql))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(insert_sql))
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS _staging_gen"))
 
     with engine.connect() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM fact_generation_mix")).scalar_one()
 
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE _staging_gen"))
     return int(count)
 
 
