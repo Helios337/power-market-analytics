@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -23,7 +25,7 @@ OUTPUT_PATH = PROJECT_ROOT / "data" / "sample_energy.csv"
 
 FUEL_TYPES = ["Coal", "Natural Gas", "Nuclear", "Hydro", "Wind", "Solar", "Other"]
 
-REGIONS = {
+REGIONS: dict[str, dict[str, Any]] = {
     "ERCO": {
         "name": "ERCOT",
         "peak_mw": 75_000,
